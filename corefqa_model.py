@@ -75,7 +75,7 @@ class CorefQAModel(object):
                                                                                                c)
             qa_cluster_ids = self.get_top_span_cluster_ids(candidate_starts, candidate_ends, span_starts, span_ends,
                                                            cluster_ids, qa_indices)
-            return (i+1,
+            return (i + 1,
                     tf.concat([starts, tf.expand_dims(qa_starts, axis=0)], axis=0),
                     tf.concat([ends, tf.expand_dims(qa_ends, axis=0)], axis=0),
                     tf.concat([labels, tf.expand_dims(qa_cluster_ids, axis=0)], axis=0),
@@ -86,8 +86,16 @@ class CorefQAModel(object):
             qa_loop_body,
             [i0, top_antecedent_starts, top_antecedent_ends, top_antecedent_labels, top_antecedent_scores],
             [[], [None, c], [None, c], [None, c], [None, c]])
-        predictions = [top_span_starts, top_span_ends, antecedent_starts, antecedent_ends, antecedent_scores]
-        losses = self.softmax_loss(antecedent_scores, antecedent_labels)
+        predictions = [doc_idx, subtoken_map, top_span_starts, top_span_ends,
+                       antecedent_starts, antecedent_ends, antecedent_scores]
+
+        same_cluster_indicator = tf.equal(antecedent_labels, tf.expand_dims(top_span_cluster_ids, 1))  # (k, c)
+        pairwise_labels = tf.logical_and(same_cluster_indicator, tf.expand_dims(top_span_cluster_ids > 0, 1))  # (k, c)
+        dummy_labels = tf.logical_not(tf.reduce_any(pairwise_labels, 1, keepdims=True))  # [k, 1]
+        loss_antecedent_labels = tf.concat([dummy_labels, pairwise_labels], 1)  # [k, c + 1]
+        dummy_scores = tf.zeros([k, 1])
+        loss_antecedent_scores = tf.concat([dummy_scores, antecedent_scores], 1)  # [k, c + 1]
+        losses = self.softmax_loss(loss_antecedent_scores, loss_antecedent_labels)
         return predictions, losses
 
     def get_bert_embeddings(self, flattened_input_ids, flattened_input_mask, is_training: bool):
@@ -223,9 +231,9 @@ class CorefQAModel(object):
         mention_end_in_sentence = mention_end[0][0] - sentence_start[0][0]
 
         question_token_ids = tf.concat([original_tokens[: mention_start_in_sentence],
-                                        [self.config.mention_idx],
+                                        [self.config.mention_start_idx],
                                         original_tokens[mention_start_in_sentence: mention_end_in_sentence + 1],
-                                        [self.config.mention_idx],
+                                        [self.config.mention_end_idx],
                                         original_tokens[mention_end_in_sentence + 1:],
                                         ], 0)
         tf.debugging.assert_less_equal(tf.shape(question_token_ids)[0], self.config.max_question_len)

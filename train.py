@@ -1,84 +1,88 @@
 #!/usr/bin/env python
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import logging
+# -*- coding:utf-8 _*-
+"""
+@author: Wei Wu
+@license: Apache Licence
+@file: train.py
+@time: 2020/02/10
+@contact: wu.wei@pku.edu.cn
+"""
 import os
-import time
-
+import yaml
 import tensorflow as tf
 
-import util
+from model_fn_builder import model_fn_builder
+from file_based_input_fn_builder import file_based_input_fn_builder
 
-format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
-logging.basicConfig(format=format)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+FLAGS = tf.flags.FLAGS
+tf.flags.DEFINE_string("config_name", "spanbert_base", "config name used to train the model.")
+tf.flags.DEFINE_bool("output_dir", "data", "The output directory of the model training.")
+tf.flags.DEFINE_bool("do_train", False, "Whether to run training.")
+tf.flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
+tf.flags.DEFINE_bool("do_predict", False, "Whether to run the model in inference mode on the test set.")
+tf.flags.DEFINE_integer("iterations_per_loop", 1000, "How many steps to make in each estimator call.")
+tf.flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
+tf.flags.DEFINE_string("tpu_name", None, "The Cloud TPU to use for training. This should be either the name "
+                       "used when creating the Cloud TPU, or a grpc://ip.address.of.tpu:8470 url.")
+tf.flags.DEFINE_string("tpu_zone", None, "[Optional] GCE zone where the Cloud TPU is located in. If not "
+                       "specified, we will attempt to automatically detect the GCE project from metadata.")
+tf.flags.DEFINE_string("gcp_project", None, "[Optional] Project name for the Cloud TPU-enabled project. If not "
+                       "specified, we will attempt to automatically detect the GCE project from metadata.")
+tf.flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
+tf.flags.DEFINE_integer("num_tpu_cores", 8, "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
 
-def main():
-    config = util.initialize_from_env()
+class Config(object):
+    def __init__(self, *initial_data, **kwargs):
+        for dictionary in initial_data:
+            for key in dictionary:
+                setattr(self, key, dictionary[key])
+        for key in kwargs:
+            setattr(self, key, kwargs[key])
 
-    report_frequency = config["report_frequency"]
-    eval_frequency = config["eval_frequency"]
 
-    model = util.get_model(config)
-    saver = tf.train.Saver()
+def main(_):
+    tf.logging.set_verbosity(tf.logging.INFO)
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.yml')
+    config_dict = yaml.safe_load(open(config_path))
+    config = Config(config_dict[FLAGS.config_name])
+    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+        raise ValueError("At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
-    log_dir = config["log_dir"]
-    max_steps = config['num_epochs'] * config['num_docs']
-    writer = tf.summary.FileWriter(log_dir, flush_secs=20)
+    tf.gfile.MakeDirs(FLAGS.output_dir)
+    tpu_cluster_resolver = None
+    if FLAGS.use_tpu and FLAGS.tpu_name:
+        tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+            FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
-    max_f1 = 0
-    mode = 'w'
+    is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
+    run_config = tf.contrib.tpu.RunConfig(
+        cluster=tpu_cluster_resolver,
+        master=FLAGS.master,
+        model_dir=FLAGS.output_dir,
+        save_checkpoints_steps=config.save_checkpoints_steps,
+        tpu_config=tf.contrib.tpu.TPUConfig(
+            iterations_per_loop=FLAGS.iterations_per_loop,
+            num_shards=FLAGS.num_tpu_cores,
+            per_host_input_for_training=is_per_host))
 
-    with tf.Session() as session:
-        session.run(tf.global_variables_initializer())
-        model.start_enqueue_thread(session)
-        accumulated_loss = 0.0
+    num_train_steps = config.num_docs * config.num_epochs
+    model_fn = model_fn_builder(config)
+    estimator = tf.contrib.tpu.TPUEstimator(
+        use_tpu=FLAGS.use_tpu,
+        model_fn=model_fn,
+        config=run_config,
+        train_batch_size=1,
+        eval_batch_size=1,
+        predict_batch_size=1)
 
-        initial_step = 0
-        ckpt = tf.train.get_checkpoint_state(log_dir)
-        if ckpt and ckpt.model_checkpoint_path:
-            print("Restoring from: {}".format(ckpt.model_checkpoint_path))
-            saver.restore(session, ckpt.model_checkpoint_path)
-            mode = 'a'
-            initial_step = int(os.path.basename(ckpt.model_checkpoint_path).split('-')[1])
-        fh = logging.FileHandler(os.path.join(log_dir, 'stdout.log'), mode=mode)
-        fh.setFormatter(logging.Formatter(format))
-        logger.addHandler(fh)
-
-        initial_time = time.time()
-        while True:
-            tf_loss, tf_global_step, _ = session.run([model.loss, model.global_step, model.train_op])
-            accumulated_loss += tf_loss
-            # print('tf global_step', tf_global_step)
-
-            if tf_global_step % report_frequency == 0:
-                steps_per_second = (tf_global_step - initial_step) / (time.time() - initial_time)
-
-                average_loss = accumulated_loss / report_frequency
-                logger.info("[{}] loss={:.2f}, steps/s={:.2f}".format(tf_global_step, average_loss, steps_per_second))
-                writer.add_summary(util.make_summary({"loss": average_loss}), tf_global_step)
-                accumulated_loss = 0.0
-
-            if tf_global_step % eval_frequency == 0:
-                eval_summary, eval_f1 = model.evaluate(session)
-
-                if eval_f1 > max_f1:
-                    max_f1 = eval_f1
-                    saver.save(session, os.path.join(log_dir, "model"), global_step=tf_global_step)
-                    util.copy_checkpoint(os.path.join(log_dir, "model-{}".format(tf_global_step)),
-                                         os.path.join(log_dir, "model.max.ckpt"))
-
-                writer.add_summary(eval_summary, tf_global_step)
-                writer.add_summary(util.make_summary({"max_eval_f1": max_f1}), tf_global_step)
-
-                logger.info("[{}] evaL_f1={:.4f}, max_f1={:.4f}".format(tf_global_step, eval_f1, max_f1))
-                if tf_global_step > max_steps:
-                    break
+    if FLAGS.do_train:
+        train_input_fn = file_based_input_fn_builder(
+            input_file=config.train_file,
+            is_training=True,
+            drop_remainder=True)
+        estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
 
 
 if __name__ == '__main__':
-    main()
+    tf.app.run()
