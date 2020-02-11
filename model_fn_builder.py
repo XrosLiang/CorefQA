@@ -28,9 +28,8 @@ def model_fn_builder(config):
 
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
-        predictions, losses = coref_model.forward(features, is_training)
-        total_loss = tf.reduce_sum(losses)
-        top_span_starts, top_span_ends, top_antecedents, top_antecedent_scores = predictions
+        predictions, total_loss = coref_model.forward(features, is_training)
+        doc_idx, subtoken_map, top_span_starts, top_span_ends, antecedent_starts, antecedent_ends, antecedent_scores = predictions
         tvars = tf.trainable_variables()
         initialized_variables = {}
         scaffold_fn = None
@@ -63,7 +62,7 @@ def model_fn_builder(config):
             def metric_fn(loss):
                 return {"eval_loss": tf.metrics.mean(loss)}
 
-            eval_metrics = (metric_fn, [losses])
+            eval_metrics = (metric_fn, [total_loss])
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
                 loss=total_loss,
@@ -72,8 +71,10 @@ def model_fn_builder(config):
         else:
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
-                predictions={"top_span_starts": top_span_starts, "top_span_ends": top_span_ends, "loss": total_loss,
-                             "top_antecedents": top_antecedents, "top_antecedent_scores": top_antecedent_scores},
+                predictions={"doc_idx": doc_idx, "subtoken_map": subtoken_map,
+                             "top_span_starts": top_span_starts, "top_span_ends": top_span_ends,
+                             "antecedent_starts": antecedent_starts, "antecedent_ends": antecedent_ends,
+                             "antecedent_scores": antecedent_scores, "loss": total_loss},
                 scaffold_fn=scaffold_fn)
         return output_spec
 

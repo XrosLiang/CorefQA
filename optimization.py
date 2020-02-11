@@ -37,9 +37,10 @@ def create_custom_optimizer(loss, config):
 
     # Implements linear warmup. I.e., if global_step < num_warmup_steps, the
     # learning rate will be `global_step/num_warmup_steps * init_lr`.
-    if config.num_warmup_steps:
+    num_warmup_steps = int(config.warmup_ratio * config.num_train_steps)
+    if num_warmup_steps:
         global_steps_int = tf.cast(global_step, tf.int32)
-        warmup_steps_int = tf.constant(config.num_warmup_steps, dtype=tf.int32)
+        warmup_steps_int = tf.constant(num_warmup_steps, dtype=tf.int32)
 
         global_steps_float = tf.cast(global_steps_int, tf.float32)
         warmup_steps_float = tf.cast(warmup_steps_int, tf.float32)

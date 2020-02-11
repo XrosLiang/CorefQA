@@ -19,19 +19,21 @@ class CorefQAModel(object):
         self.bert_config = BertConfig.from_json_file(self.config.bert_config_file)
 
     def forward(self, features, is_training):
-        doc_idx = features['doc_idx']  # (1,)
-        sentence_map = features['sentence_map']  # (num_tokens, ) tokens to sentence id
-        subtoken_map = features['subtoken_map']  # (num_tokens, ) tokens to word id
-        flattened_input_ids = features['flattened_input_ids']  # (num_windows * window_size)
-        flattened_input_mask = features['flattened_input_mask']  # (num_windows * window_size)
-        span_starts = features['span_starts']  # (num_spans, ) span start indices
-        span_ends = features['span_ends']  # (num_spans, ) span end indices
-        cluster_ids = features['cluster_ids']  # (num_spans, ) span to cluster indices
-
+        doc_idx = tf.squeeze(features['doc_idx'], 0)  # (1,)
+        sentence_map = tf.squeeze(features['sentence_map'], 0)  # (num_tokens, ) tokens to sentence id
+        subtoken_map = tf.squeeze(features['subtoken_map'], 0)  # (num_tokens, ) tokens to word id
+        flattened_input_ids = tf.squeeze(features['flattened_input_ids'], 0)  # (num_windows * window_size)
+        flattened_input_mask = tf.squeeze(features['flattened_input_mask'], 0)  # (num_windows * window_size)
+        span_starts = tf.squeeze(features['span_starts'], 0)  # (num_spans, ) span start indices
+        span_ends = tf.squeeze(features['span_ends'], 0)  # (num_spans, ) span end indices
+        cluster_ids = tf.squeeze(features['cluster_ids'], 0)  # (num_spans, ) span to cluster indices
+        print('lala', doc_idx, sentence_map, subtoken_map, flattened_input_ids, flattened_input_mask,
+              span_starts, span_ends, cluster_ids)
         dropout = 1 - (tf.cast(is_training, tf.float32) * self.config.dropout_rate)
         bert_embeddings = self.get_bert_embeddings(flattened_input_ids, flattened_input_mask, is_training)  # (num_tokens, embed_size)
         candidate_starts, candidate_ends = self.get_candidate_spans(sentence_map)  # (num_candidates), (num_candidates)
-        num_candidate_mentions = tf.cast(tf.shape(bert_embeddings)[0] * self.config.span_ratio, tf.int32)
+        num_tokens = tf.cast(tf.shape(bert_embeddings)[0], tf.float32)
+        num_candidate_mentions = tf.cast(num_tokens * self.config.span_ratio, tf.int32)
         k = tf.minimum(self.config.max_candidate_num, num_candidate_mentions)
         c = tf.minimum(self.config.max_antecedent_num, k)
         top_span_scores, top_span_indices, top_span_starts, top_span_ends, top_span_emb = self.filter_by_mention_scores(
@@ -82,10 +84,11 @@ class CorefQAModel(object):
                     tf.concat([scores, tf.expand_dims(qa_scores, axis=0)], axis=0))
 
         _, antecedent_starts, antecedent_ends, antecedent_labels, antecedent_scores = tf.while_loop(
-            lambda i, o1, o2, o3, o4: i < k,
-            qa_loop_body,
-            [i0, top_antecedent_starts, top_antecedent_ends, top_antecedent_labels, top_antecedent_scores],
-            [[], [None, c], [None, c], [None, c], [None, c]])
+            cond=lambda i, o1, o2, o3, o4: i < k,
+            body=qa_loop_body,
+            loop_vars=[i0, top_antecedent_starts, top_antecedent_ends, top_antecedent_labels, top_antecedent_scores],
+            shape_invariants=[i0.get_shape(), tf.TensorShape([None, None]), tf.TensorShape([None, None]),
+                              tf.TensorShape([None, None]), tf.TensorShape([None, None])])
         predictions = [doc_idx, subtoken_map, top_span_starts, top_span_ends,
                        antecedent_starts, antecedent_ends, antecedent_scores]
 
@@ -95,8 +98,8 @@ class CorefQAModel(object):
         loss_antecedent_labels = tf.concat([dummy_labels, pairwise_labels], 1)  # [k, c + 1]
         dummy_scores = tf.zeros([k, 1])
         loss_antecedent_scores = tf.concat([dummy_scores, antecedent_scores], 1)  # [k, c + 1]
-        losses = self.softmax_loss(loss_antecedent_scores, loss_antecedent_labels)
-        return predictions, losses
+        loss = self.softmax_loss(loss_antecedent_scores, loss_antecedent_labels)
+        return predictions, loss
 
     def get_bert_embeddings(self, flattened_input_ids, flattened_input_mask, is_training: bool):
         """
@@ -114,6 +117,8 @@ class CorefQAModel(object):
         flattened_embeddings = tf.reshape(bert_embeddings, [-1, self.bert_config.hidden_size])
         flattened_mask = tf.greater_equal(flattened_input_mask, 0)
         output_embeddings = tf.boolean_mask(flattened_embeddings, flattened_mask)
+        print('xixi', bert_embeddings.get_shape(), output_embeddings.get_shape(), flattened_embeddings.get_shape(),
+              flattened_mask.get_shape())
         return output_embeddings
 
     def get_candidate_spans(self, sentence_map):
@@ -150,7 +155,7 @@ class CorefQAModel(object):
         :return: (num_candidates, embed_size)
         """
         span_emb_list = []
-
+        print('hahaha', token_embeddings.get_shape(), span_starts.get_shape())
         span_start_emb = tf.gather(token_embeddings, span_starts)  # [num_candidates, embed_size]
         span_emb_list.append(span_start_emb)
 
@@ -160,9 +165,10 @@ class CorefQAModel(object):
         span_width = span_ends - span_starts  # [num_candidates]
 
         if self.config.use_span_width_embeddings:
-            span_width_embeddings = tf.get_variable("span_width_embeddings", [self.config.max_span_width,
-                                                                              self.config.span_width_embed_size],
-                                                    initializer=tf.truncated_normal_initializer(stddev=0.02))
+            with tf.variable_scope('span_width', reuse=tf.AUTO_REUSE):
+                span_width_embeddings = tf.get_variable("span_width_embeddings", [self.config.max_span_width,
+                                                                                  self.config.span_width_embed_size],
+                                                        initializer=tf.truncated_normal_initializer(stddev=0.02))
             span_width_emb = tf.gather(span_width_embeddings, span_width)  # [num_candidates, embed_size]
             span_emb_list.append(span_width_emb)
 
@@ -180,8 +186,9 @@ class CorefQAModel(object):
         :return: top_span_indices: (k, ) selected span indices w.r.t num_candidates
         """
         candidate_embeddings = self.get_span_embeddings(bert_embeddings, candidate_starts, candidate_ends)  # [num_candidates, embed_size]
-        candidate_mention_scores = utils.ffnn(candidate_embeddings, self.config.ffnn_depth, self.config.ffnn_size,
-                                              1, dropout)  # [num_candidates]
+        with tf.variable_scope('mention_score', reuse=tf.AUTO_REUSE):
+            candidate_mention_scores = utils.ffnn(candidate_embeddings, self.config.ffnn_depth, self.config.ffnn_size,
+                                                  1, dropout)  # [num_candidates]
 
         top_span_scores, top_span_indices = tf.nn.top_k(candidate_mention_scores, k)
         top_span_starts = tf.gather(candidate_starts, top_span_indices)  # [k]
@@ -220,7 +227,8 @@ class CorefQAModel(object):
         :return: vector of integer, question tokens
         """
         sentence_idx = sentence_map[top_start]
-        sentence_tokens = tf.where(tf.equal(sentence_map, sentence_idx))
+        sentence_tokens = tf.cast(tf.where(tf.equal(sentence_map, sentence_idx)), tf.int32)
+        print('wuwu', flattened_input_mask.dtype, sentence_tokens.dtype, sentence_map.dtype, sentence_idx.dtype)
         sentence_start = tf.where(tf.equal(flattened_input_mask, sentence_tokens[0][0]))
         sentence_end = tf.where(tf.equal(flattened_input_mask, sentence_tokens[-1][0]))
         original_tokens = flattened_input_ids[sentence_start[0][0]: sentence_end[0][0] + 1]
