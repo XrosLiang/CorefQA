@@ -63,9 +63,9 @@ class CorefQAModel(object):
             qa_input_ids = tf.concat([tiled_question, input_ids], 1)  # (num_windows, num_ques_tokens + window_size)
             qa_input_mask = tf.concat([question_ones, actual_mask], 1)  # (num_windows, num_ques_tokens + window_size)
             token_type_ids = tf.concat([question_zeros, actual_mask], 1)
-
-            bert_model = BertModel(self.bert_config, is_training, qa_input_ids, qa_input_mask, token_type_ids,
-                                   scope='qa')
+            with tf.variable_scope('bert', reuse=tf.AUTO_REUSE):
+                bert_model = BertModel(self.bert_config, is_training, qa_input_ids, qa_input_mask, token_type_ids,
+                                       scope='bert')
             bert_embeddings = bert_model.get_sequence_output()  # num_windows, num_ques_tokens + window_size, embed_size
             flattened_embeddings = tf.reshape(bert_embeddings, [-1, self.bert_config.hidden_size])
             output_mask = tf.concat([-1 * question_ones, input_mask], 1)  # (num_windows, num_ques_tokens + window_size)
@@ -112,7 +112,8 @@ class CorefQAModel(object):
         input_ids = tf.reshape(flattened_input_ids, [-1, self.config.sliding_window_size])
         input_mask = tf.reshape(flattened_input_mask, [-1, self.config.sliding_window_size])
         actual_mask = tf.cast(tf.not_equal(input_mask, self.config.pad_idx), tf.int32)
-        bert_model = BertModel(self.bert_config, is_training, input_ids, actual_mask, scope='bert')
+        with tf.variable_scope('bert', reuse=tf.AUTO_REUSE):
+            bert_model = BertModel(self.bert_config, is_training, input_ids, actual_mask, scope='bert')
         bert_embeddings = bert_model.get_sequence_output()  # (num_windows, window_size, embed_size)
         flattened_embeddings = tf.reshape(bert_embeddings, [-1, self.bert_config.hidden_size])
         flattened_mask = tf.greater_equal(flattened_input_mask, 0)
